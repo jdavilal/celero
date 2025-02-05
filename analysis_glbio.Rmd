@@ -1,0 +1,430 @@
+---
+title: "K-mer analysis"
+output:
+  html_document:
+    keep_md: yes  
+  word_document: default
+always_allow_html: true
+author: "Emma Clift/Jaime Davila"
+date: "2025-01-31"
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+```{r}
+library(tidyverse)
+library(grid)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(tidymodels)
+library(usemodels)
+```
+
+
+# Cohort results
+
+We load the data from our analysis
+
+```{r}
+kmer_analysis <- read_csv("kmer_analysis.csv")
+```
+
+Let's see the distribution of the number of reads for the tumor, normal, and their difference
+
+First, for tumor:
+
+```{r}
+kmer_analysis |>
+  filter(l==9) |>
+  ggplot(aes(tumor_num_reads)) +
+  geom_histogram(bins=20)
+
+kmer_analysis |>
+  filter( tumor_num_reads<2*10^7) |>
+  filter(l==9) |>
+  select(sample_name, tumor_num_reads, normal_num_reads) |>
+  kable(format = 'pipe', boarder=5, digits=2,
+          format.args = list(big.mark = ",",scientific = FALSE))
+
+```
+
+And for normal
+
+```{r}
+kmer_analysis |>
+  filter(l==9) |>
+  ggplot(aes(normal_num_reads)) +
+  geom_histogram(bins=20)
+
+kmer_analysis |>
+  filter( normal_num_reads<2*10^7) |>
+  filter(l==9) |>
+  select(sample_name, tumor_num_reads, normal_num_reads) |>
+  kable(format = 'pipe', boarder=5, digits=2,
+          format.args = list(big.mark = ",",scientific = FALSE))
+
+```
+
+
+And for the difference:
+
+```{r}
+kmer_analysis |>
+  filter(l==9) |>
+  ggplot(aes(tumor_num_reads-normal_num_reads)) +
+  geom_histogram(bins=25)
+```
+
+We implementing the following filteria criteria for our samples:
+
+* More than 20 million reads in both normal and tumor
+* Difference in coverage between normal and tumor does not exceed 50 million reads
+* Were excluded in the analysis in https://pubmed.ncbi.nlm.nih.gov/33549857/, due to ambigous status (MSS6 and PMS2_9 had also POLE mutations)
+
+```{r}
+kmer_tbl_filter <- kmer_analysis |>
+  filter( (abs(tumor_num_reads-normal_num_reads)< 5*10^7) ) |>
+  filter( tumor_num_reads > 2*10^7) |>
+  filter( normal_num_reads >2*10^7) |>
+  filter(sample_name != "MSS_6"  & sample_name!="PMS2_9") |>
+  mutate(status = if_else(identifier=="MSI_MLH1G" | identifier =="MSI_MLH1HM" 
+                          | identifier =="MSI_MSH2" | identifier =="MSI_MSH6" 
+                          | identifier =="MSI_PMS2", "MSI-H", "MSS"),
+         status = factor(status, levels=c("MSS", "MSI-H")),
+         status_num = if_else(status=="MSI", 1, 0))
+
+```
+
+Let's collect the number of reads statistics for each sample
+
+```{r}
+kmer_tbl_filter |>
+  filter(l==9) |>
+  select(tumor_num_reads,normal_num_reads) |>
+  pivot_longer(c(tumor_num_reads, normal_num_reads), names_to="Read number") |>
+  group_by(`Read number`)|>
+  summarize(med = median(value),
+            iqr = IQR (value)) |>
+  kable(format = 'pipe',digits = 3, 
+        format.args = list(big.mark = ",",scientific = FALSE))
+```
+
+
+Let's tally how many samples we have by type:
+
+```{r}
+kmer_tbl_filter |>
+  filter(l==9) |>
+  count(status) |>
+  kable()
+```
+
+
+# K-mer and time statistics
+
+
+## Numbers of kmers with increasing mononucleotide repeat length
+
+We are interested in quantifying the number of kmers for the first phase of our algorithm:
+
+```{r}
+kmer_tbl_filter |>
+  ggplot(aes(x=as.factor(l), y=num_kmers)) +
+  geom_boxplot() + 
+  scale_y_log10() +
+  labs(y="Number of k-mers", x="Length of mononucleotide")
+```
+
+
+```{r}
+kmer_tbl_filter |>
+  group_by(l) |>
+  summarize(med = median (num_kmers),
+            iqr = IQR(num_kmers))|>
+  kable(format = 'pipe', digits = 3, 
+        format.args = list(big.mark = ",",scientific = FALSE))
+```
+
+Increasing the size of the mono nucleotides repeat considered has an exponential effect on the number of k-mers used. Let's notice that by using mononucleotides of size 9 our median number of kmers is 1,408 with an IQR of 912.5.
+
+
+## Running time as a function of mononucleotide repeat
+
+Our algorithm has two phases:
+
+1. In the first phase it filters the number of k-mers
+
+2. In the second phase it calculates the indel using a standard bioinformatic approach
+
+We will be quantifying the times it takes for these two phases across our cohort
+
+
+```{r}
+kmer_tbl_filter |>
+  select(sample_name, l, KMER_TIME, PROC_TIME) |>
+  group_by(l) |>
+  summarize("Phase I median" = median (KMER_TIME),
+            "Phase I iqr " = IQR (KMER_TIME),
+            "Phase II median " = median(PROC_TIME),
+            "Phase I iqr" = IQR (PROC_TIME),
+            "Total median" = median(KMER_TIME+PROC_TIME),
+            "Total iqr"= IQR(KMER_TIME+PROC_TIME)) |>
+    kable(format = 'pipe', boarder=5, digits=0)
+```
+
+
+Let's notice that for mononucleotide lenght of 7 and up, our median filtering phase is around 68 (16)s and it is pretty stable after that. Our second phase plateaus around 35 seconds. Seems the time decrease is marginal so we stop around k=9.
+
+## Reads, kmers, and insertions/deletions
+
+
+As we increase the number of reads, we expect to have more k-mers in our synthetic reference. Let's do a quick plot to verify that:
+
+```{r}
+kmer_tbl_filter |>
+  ggplot(aes(tumor_num_reads, num_kmers)) +
+  geom_point()+
+  scale_y_log10()+
+  facet_grid(~l)+
+  geom_smooth(method="lm")
+```
+
+We also expect that as our number of k-mers increases, the indels that we find will increase as well
+
+```{r}
+kmer_tbl_filter |>
+  ggplot(aes(num_kmers, num_indels)) +
+  geom_point()+
+  scale_y_log10()+
+  scale_x_log10()+
+  facet_grid(~l)+
+  geom_smooth(method="lm")
+```
+
+Let's go into detail for `l=9` breaking it down by deletions, insertions:
+
+```{r}
+kmer_tbl_filter |>
+  filter(l==9) |>
+  select(num_kmers, num_indels, num_deletions, num_insertions) |>
+  pivot_longer(c(num_indels, num_deletions, num_insertions))|>
+  ggplot(aes(num_kmers, value)) +
+  geom_point()+
+  geom_smooth(method="lm")+
+  facet_grid(.~name)
+```
+
+Seems the number of deletions is much higher than the number of deletions.
+
+This motivates us to normalize indels, deletions, and insertions using the number of k-mers as a denominator:
+
+```{r}
+kmer_tbl_filter <- kmer_tbl_filter |>
+  mutate(indel_dens = num_indels/num_kmers*1000,
+         ins_dens = num_insertions/num_kmers*1000,
+         del_dens = num_deletions/num_kmers*1000 )
+```
+
+And we finally consider only when l=9 for the remaining of the analysis
+
+```{r}
+kmer_tbl_analysis <- kmer_tbl_filter |>
+  filter(l==9)
+```
+
+# MSI status and number of indels
+
+
+We expect to see differences in number of indels across MSI status
+
+```{r}
+kmer_tbl_analysis |>
+  ggplot(aes(x=status, y=indel_dens, fill=status)) +
+  geom_boxplot()
+```
+
+And according to https://pmc.ncbi.nlm.nih.gov/articles/PMC7111525/ we should see more separation in deletions
+
+```{r}
+kmer_tbl_analysis |>
+  ggplot(aes(x=status, y=del_dens, fill=status)) +
+  geom_boxplot()
+```
+
+Let's combine those two plots in a single image
+
+```{r}
+kmer_tbl_analysis |>
+  select(status, indel_dens, del_dens) |>
+  pivot_longer(c(indel_dens, del_dens)) |>
+  ggplot(aes(status, value, fill=status)) +
+  geom_boxplot()+
+  facet_grid(.~name)
+```
+
+
+
+```{r}
+kmer_tbl_analysis |>
+  group_by(status) |>
+  summarize(mean_indel=mean(indel_dens),
+            sd_indel=sd(indel_dens),
+            mean_del=mean(del_dens), 
+            sd_del=sd(del_dens))|>
+  kable(format = 'pipe', boarder=5, digits = 1, 
+        format.args = list(big.mark = ",",scientific = FALSE))
+
+
+```
+
+And here are the results for the t-test for:
+
+* Indel density:
+
+```{r}
+mosaic::t.test(indel_dens~status, data=kmer_tbl_analysis)
+```
+
+* Deletion density
+
+```{r}
+mosaic::t.test(del_dens~status, data=kmer_tbl_analysis)
+```
+
+
+# Predicting MSI status
+
+We first start by dividing into testing/training. Since our dataset is small we divide equally and we stratify by status, since we have few MSS cases
+
+```{r}
+set.seed(2568)
+
+kmer_split <- initial_split(kmer_tbl_analysis, prop=0.5, strata=status)
+kmer_training = training(kmer_split)
+kmer_testing = testing(kmer_split)
+```
+
+We will be creating some boilerplate for creating and evaluating logistic models
+
+```{r}
+fit_logistic <- function(recipe, train) {
+  logit_model <- 
+    logistic_reg() |> 
+    set_mode("classification") |> 
+    set_engine("glm")
+  
+  logit_wf <- workflow()|>
+    add_model(logit_model) |>
+    add_recipe(recipe)
+
+  fit(logit_wf, data = train)  
+}
+
+evaluate_model <- function (model, test) {
+  class_metrics <- metric_set(accuracy, specificity, sensitivity)
+  
+  roc_auc <- augment(model, test) |>
+    roc_auc(status, .pred_MSS)
+
+  augment(model, test) |>
+    class_metrics(status, estimate=.pred_class) |>
+    bind_rows(roc_auc)
+}
+
+plot_ROC <- function (model, test) {
+  augment(model, test) |>
+    roc_curve(status, .pred_MSS) |>
+    autoplot()
+}
+```
+
+And we will test with a simple model based on the number of indel density
+
+
+```{r}
+logit_indels_rec <- recipe (formula = status ~ indel_dens, data=kmer_training)
+
+logit_indel1 <- fit_logistic(logit_indels_rec, kmer_training)
+
+augment(logit_indel1, kmer_testing) |>
+    conf_mat(status, .pred_class)
+
+evaluate_model(logit_indel1, kmer_testing) |>
+    kable(format = 'pipe', boarder=5, digits=2)
+
+plot_ROC(logit_indel1, kmer_testing)
+```
+
+Not great, ah?. Let's refine our approach by adding the densitiy of deletions as well
+
+```{r}
+logit_2_rec <- recipe (formula = status ~ del_dens + indel_dens, data=kmer_training)
+logit_indel2 <- fit_logistic(logit_2_rec, kmer_training)
+
+augment(logit_indel2, kmer_testing) |>
+    conf_mat(status, .pred_class)
+
+evaluate_model(logit_indel2, kmer_testing) |>
+    kable(format = 'pipe', boarder=5, digits=2)
+
+plot_ROC(logit_indel2, kmer_testing)
+```
+
+And let's see the samples that are mis-sclassified
+
+```{r}
+augment(logit_indel2, kmer_testing) |>
+  filter(.pred_class != status) |>
+  select(sample_name, num_kmers, num_insertions, num_deletions) |>
+    kable(format = 'pipe', boarder=5, digits=2,
+          format.args = list(big.mark = ",",scientific = FALSE))
+```
+
+
+And let's look at the model
+
+```{r}
+tidy(logit_indel2) |>
+    kable(format = 'pipe', boarder=5, digits=2)
+```
+
+Finally let's quickly visualize the decision boundary for our model
+
+
+```{r}
+summary(kmer_testing$indel_dens)
+summary(kmer_testing$del_dens)/1000
+
+del_vec = seq(0.01,0.04, by=0.0001)*1000
+indel_vec = seq(0.01,0.05, by=0.0001)*1000
+grid_tbl <- expand_grid(del_dens=del_vec, indel_dens=indel_vec)
+
+ggplot(kmer_testing) +
+  geom_point(aes(del_dens, indel_dens, shape=status, color=status),size=3)+
+  geom_tile(data=augment(logit_indel2, grid_tbl),
+            aes(del_dens, indel_dens, fill=.pred_MSS),
+            alpha=0.3)+
+  scale_fill_viridis_b() +
+  scale_y_continuous(name="Deletions per 1,000 k-mers")+
+  scale_x_continuous("Indels per 1,000 k-mers") +
+  labs (fill="MSS probability")+
+  labs (color="MSI status") +
+  labs (shape="MSI status")
+
+ggsave("figure.2.png", units="in", dpi=300, 
+       scale=1, width=5, height=5 )
+
+
+```
+
+This analysis was done using the following environment
+
+```{r}
+sessionInfo()
+```
+
