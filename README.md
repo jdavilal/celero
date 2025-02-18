@@ -1,5 +1,9 @@
 # Introduction
 Celero is a fast detection method of microsatellite status in RNA-seq data that leverages k-mer methods. 
+
+## Overview of Workflow
+<img width="458" alt="Screenshot 2025-02-18 at 11 17 18 AM" src="https://github.com/user-attachments/assets/44640da3-be84-4ba7-9e89-fcec0e9962c7" />
+
 ## Additional Data
 - Synthetic references (includes l = 7, 9, 11, 13)
 
@@ -28,7 +32,7 @@ python3 celero_program.py -ds -t tumorSRR -n normalSRR -l 9 -p /path/to/kmc -o o
 
 # Installation guide
 ## Dependencies
-All dependencies must be downloaded and installed to run `Celero`. All dependencies are assumed to be in the current working directory when running `Celero`.
+All dependencies must be downloaded and installed to run `Celero`. All dependencies except `KMC` are assumed to be in the current working directory when running `Celero`.
 
 - SRA-Toolkit (https://github.com/ncbi/sra-tools/wiki/02.-Installing-SRA-Toolkit)
 - seqtk (https://github.com/lh3/seqtk)
